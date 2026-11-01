@@ -1,0 +1,25 @@
+.DS_Store
+*.py[cod]
+__pycache__/
+
+# Build and release products are generated locally and may be large.
+build/*
+!build/.gitkeep
+!build/README.md
+build/opencl120/*
+!build/opencl120/.gitkeep
+release/*
+!release/.gitkeep
+!release/README.md
+
+# Whisper weights and runtime logs are not source artifacts.
+models/*
+!models/.gitkeep
+!models/README.md
+logs/*
+!logs/.gitkeep
+!logs/README.md
+
+# Generated local test audio and API responses.
+tests/data/
+tests/results/

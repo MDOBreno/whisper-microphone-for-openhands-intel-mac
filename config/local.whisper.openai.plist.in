@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>@LABEL@</string>
+  <key>ProgramArguments</key>
+  <array><string>@PROJECT_ROOT@/scripts/whisper-daemon.sh</string></array>
+  <key>WorkingDirectory</key><string>@PROJECT_ROOT@</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>@RUNTIME_ROOT@/logs/service.log</string>
+  <key>StandardErrorPath</key><string>@RUNTIME_ROOT@/logs/service.err</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin</string>
+    <key>WHISPER_RUNTIME_ROOT</key><string>@RUNTIME_ROOT@</string>
+    <key>GGML_OPENCL_PLATFORM</key><string>0</string>
+    <key>GGML_OPENCL_F32_BUFFER_MB</key><string>512</string>
+  </dict>
+</dict>
+</plist>

@@ -1,0 +1,602 @@
+diff --git a/examples/common-ggml.cpp b/examples/common-ggml.cpp
+index 11a5c0a1..d10bc49d 100644
+--- a/examples/common-ggml.cpp
++++ b/examples/common-ggml.cpp
+@@ -48,6 +48,7 @@ bool ggml_common_quantize_0(
+     ggml_type qtype = GGML_TYPE_F32;
+ 
+     switch (ftype) {
++        case GGML_FTYPE_ALL_F32: qtype = GGML_TYPE_F32; break;
+         case GGML_FTYPE_MOSTLY_Q4_0: qtype = GGML_TYPE_Q4_0; break;
+         case GGML_FTYPE_MOSTLY_Q4_1: qtype = GGML_TYPE_Q4_1; break;
+         case GGML_FTYPE_MOSTLY_Q5_0: qtype = GGML_TYPE_Q5_0; break;
+@@ -59,7 +60,6 @@ bool ggml_common_quantize_0(
+         case GGML_FTYPE_MOSTLY_Q5_K: qtype = GGML_TYPE_Q5_K; break;
+         case GGML_FTYPE_MOSTLY_Q6_K: qtype = GGML_TYPE_Q6_K; break;
+         case GGML_FTYPE_UNKNOWN:
+-        case GGML_FTYPE_ALL_F32:
+         case GGML_FTYPE_MOSTLY_F16:
+         case GGML_FTYPE_MOSTLY_Q4_1_SOME_F16:
+         case GGML_FTYPE_MOSTLY_IQ2_XXS:
+@@ -82,7 +82,7 @@ bool ggml_common_quantize_0(
+                 }
+     };
+ 
+-    if (!ggml_is_quantized(qtype)) {
++    if (ftype != GGML_FTYPE_ALL_F32 && !ggml_is_quantized(qtype)) {
+         fprintf(stderr, "%s: invalid quantization type %d (%s)\n", __func__, qtype, ggml_type_name(qtype));
+         return false;
+     }
+@@ -132,19 +132,24 @@ bool ggml_common_quantize_0(
+         }
+ 
+         // check if we should skip this tensor
+-        for (const auto & s : to_skip) {
+-            if (std::regex_match(name, std::regex(s))) {
+-                quantize = false;
+-                break;
++        if (ftype != GGML_FTYPE_ALL_F32) {
++            for (const auto & s : to_skip) {
++                if (std::regex_match(name, std::regex(s))) {
++                    quantize = false;
++                    break;
++                }
+             }
+         }
+ 
+-        // quantize only 2D tensors
+-        quantize &= (n_dims == 2);
++        // Integer quantization is limited to 2D matrices. ALL_F32 also
++        // converts vectors and other tensors, including source F16 weights.
++        if (ftype != GGML_FTYPE_ALL_F32) {
++            quantize &= (n_dims == 2);
++        }
+ 
+         if (quantize) {
+             if (ttype != GGML_TYPE_F32 && ttype != GGML_TYPE_F16) {
+-                fprintf(stderr, "%s: unsupported ttype %d (%s) for integer quantization\n", __func__, ttype, ggml_type_name((ggml_type) ttype));
++                fprintf(stderr, "%s: unsupported ttype %d (%s) for F32 conversion/quantization\n", __func__, ttype, ggml_type_name((ggml_type) ttype));
+                 return false;
+             }
+ 
+@@ -177,10 +182,13 @@ bool ggml_common_quantize_0(
+         fout.write(&name[0], length);
+ 
+         if (quantize) {
+-            work.resize(nelements); // for quantization
+-
+             size_t cur_size = 0;
+-            switch ((ggml_type) ttype) {
++            if (ftype == GGML_FTYPE_ALL_F32) {
++                cur_size = (size_t) nelements * sizeof(float);
++                fout.write(reinterpret_cast<char *>(data_f32.data()), cur_size);
++            } else {
++                work.resize(nelements); // for quantization
++                switch ((ggml_type) ttype) {
+                 case GGML_TYPE_Q4_0:
+                 case GGML_TYPE_Q4_1:
+                 case GGML_TYPE_Q5_0:
+@@ -224,9 +232,10 @@ bool ggml_common_quantize_0(
+                         fprintf(stderr, "%s: unsupported quantization type %d (%s)\n", __func__, ttype, ggml_type_name((ggml_type) ttype));
+                         return false;
+                     }
+-            }
++                }
+ 
+-            fout.write(reinterpret_cast<char *>(work.data()), cur_size);
++                fout.write(reinterpret_cast<char *>(work.data()), cur_size);
++            }
+             total_size_new += cur_size;
+ 
+             printf("size = %8.2f MB -> %8.2f MB\n", nelements * sizeof(float)/1024.0/1024.0, cur_size/1024.0/1024.0);
+diff --git a/ggml/src/ggml-opencl/ggml-opencl.cpp b/ggml/src/ggml-opencl/ggml-opencl.cpp
+index 67248264..85e6367c 100644
+--- a/ggml/src/ggml-opencl/ggml-opencl.cpp
++++ b/ggml/src/ggml-opencl/ggml-opencl.cpp
+@@ -704,7 +704,12 @@ struct ggml_backend_opencl_context {
+     size_t  image2d_max_width;
+     size_t  image2d_max_height;
+ 
++#if CL_TARGET_OPENCL_VERSION >= 200
+     cl_device_svm_capabilities svm_caps;
++#else
++    // Apple ships an OpenCL 1.2 runtime; SVM was added in OpenCL 2.0.
++    cl_bitfield svm_caps = 0;
++#endif
+ 
+     cl_context context;
+     cl_command_queue queue;
+@@ -885,6 +890,8 @@ struct ggml_backend_opencl_context {
+     cl_kernel kernel_cpy_f32_f32_pack = nullptr;
+     cl_kernel kernel_cpy_f32_f32_flat = nullptr;
+     cl_kernel kernel_mul_mat_f32_f32;
++    cl_kernel kernel_f32_generic_matmul = nullptr;
++    cl_kernel kernel_f32_generic_copy = nullptr;
+     cl_kernel kernel_mul_mat_f16_f16;
+     cl_kernel kernel_mul_mat_f16_f32_1row;
+     cl_program program_mul_mv_f16_f32_mrow;
+@@ -1121,8 +1128,12 @@ struct ggml_backend_opencl_context {
+                 info.evt, CL_PROFILING_COMMAND_START, sizeof(cl_ulong), &cmd_start, NULL));
+             CL_CHECK(clGetEventProfilingInfo(
+                 info.evt, CL_PROFILING_COMMAND_END, sizeof(cl_ulong), &cmd_end, NULL));
++#if CL_TARGET_OPENCL_VERSION >= 200
+             CL_CHECK(clGetEventProfilingInfo(
+                 info.evt, CL_PROFILING_COMMAND_COMPLETE, sizeof(cl_ulong), &cmd_complete, NULL));
++#else
++            cmd_complete = cmd_end;
++#endif
+             CL_CHECK(clReleaseEvent(info.evt));
+             info.evt = nullptr;
+ 
+@@ -1428,11 +1439,40 @@ static cl_program build_program_from_source_ex(cl_context ctx, cl_device_id dev,
+     size_t log_size;
+     int err;
+ 
+-    program_size = strlen(program_buffer);
++    std::string fp32_source;
++    const char *effective_program_buffer = program_buffer;
++    if (compile_opts.find("GGML_OPENCL_FP32_FALLBACK") != std::string::npos) {
++        // Apple OpenCL 1.2 reserves the `half` token even without cl_khr_fp16,
++        // so macros cannot alias it. Transform shared kernel sources instead.
++        fp32_source = program_buffer;
++        const std::pair<const char *, const char *> replacements[] = {
++            {"convert_half16", "convert_float16"}, {"convert_half8", "convert_float8"},
++            {"convert_half4_rte", "convert_float4"}, {"convert_half4", "convert_float4"},
++            {"convert_half3", "convert_float3"}, {"convert_half2_rte", "convert_float2"},
++            {"convert_half2", "convert_float2"}, {"convert_half_rte", "convert_float"},
++            {"convert_half", "convert_float"}, {"vload_half", "vload_half_compat"},
++            {"vstore_half", "vstore_half_compat"}, {"half16", "float16"},
++            {"half8", "float8"}, {"half4", "float4"}, {"half3", "float3"},
++            {"half2", "float2"}, {"half", "float"},
++        };
++        for (const auto & replacement : replacements) {
++            fp32_source = std::regex_replace(fp32_source,
++                std::regex(std::string("\\b") + replacement.first + "\\b"), replacement.second);
++        }
++        fp32_source = std::regex_replace(fp32_source,
++            std::regex("#pragma[ \\t]+OPENCL EXTENSION cl_khr_fp16[ \\t]*:[ \\t]*enable[^\\n]*\\n"), "");
++        fp32_source = std::regex_replace(fp32_source,
++            std::regex("([0-9]+(?:\\.[0-9]*)?)h\\b"), "$1f");
++        fp32_source =
++            "inline float vload_half_compat(size_t offset, const global float * ptr) { return ptr[offset]; }\n"
++            "inline void vstore_half_compat(float value, size_t offset, global float * ptr) { ptr[offset] = value; }\n" + fp32_source;
++        effective_program_buffer = fp32_source.c_str();
++    }
++    program_size = strlen(effective_program_buffer);
+ 
+     const int max_attempts = retry_queue ? 3 : 1;
+     for (int attempt = 0; attempt < max_attempts; ++attempt) {
+-        p = clCreateProgramWithSource(ctx, 1, (const char**)&program_buffer, &program_size, &err);
++        p = clCreateProgramWithSource(ctx, 1, &effective_program_buffer, &program_size, &err);
+         if(err < 0) {
+             GGML_LOG_ERROR("OpenCL error creating program");
+             if (fatal) exit(1);
+@@ -1785,6 +1825,12 @@ static void load_cl_kernels_gemm_coopk(ggml_backend_opencl_context * backend_ctx
+ static std::string ggml_opencl_make_compile_opts(const ggml_backend_opencl_context * backend_ctx) {
+     auto opencl_c_std =
+         std::string("CL") + std::to_string(backend_ctx->opencl_c_version.major) + "." + std::to_string(backend_ctx->opencl_c_version.minor);
++    if (!backend_ctx->fp16_support) {
++        // Keep the portable Apple OpenCL 1.2 fallback conservative. The
++        // vendor compiler's aggressive fast-math flags have caused GPU queue
++        // resets on legacy AMD drivers; this small kernel does not need them.
++        return std::string("-cl-std=") + opencl_c_std + " -DGGML_OPENCL_FP32_FALLBACK";
++    }
+     std::string compile_opts = std::string("-cl-std=") + opencl_c_std +
+                                " -cl-mad-enable -cl-unsafe-math-optimizations"
+                                " -cl-finite-math-only -cl-fast-relaxed-math";
+@@ -1793,6 +1839,10 @@ static std::string ggml_opencl_make_compile_opts(const ggml_backend_opencl_conte
+         compile_opts += " -qcom-enable-large-buffer ";
+     }
+ 
++    if (!backend_ctx->fp16_support) {
++        compile_opts += " -DGGML_OPENCL_FP32_FALLBACK";
++    }
++
+     return compile_opts;
+ }
+ 
+@@ -1808,6 +1858,126 @@ static void load_cl_kernels(ggml_backend_opencl_context *backend_ctx) {
+ 
+     GGML_LOG_INFO("ggml_opencl: loading OpenCL kernels");
+ 
++    if (!backend_ctx->fp16_support) {
++        // Portable OpenCL 1.2 fallback: tiled F32 arithmetic with optional
++        // software conversion of F16 weight storage. It avoids subgroup and
++        // native half-arithmetic APIs while keeping FP16 model files compact.
++        static const char * source = R"CLC(
++            inline float half_to_float(ushort h) {
++                uint sign = ((uint)h & 0x8000U) << 16;
++                uint exp = ((uint)h >> 10) & 0x1fU;
++                uint mant = (uint)h & 0x3ffU;
++                uint bits;
++                if (exp == 0) {
++                    if (mant == 0) bits = sign;
++                    else {
++                        int e = -14;
++                        while ((mant & 0x400U) == 0) { mant <<= 1; --e; }
++                        mant &= 0x3ffU;
++                        bits = sign | ((uint)(e + 127) << 23) | (mant << 13);
++                    }
++                } else if (exp == 31) {
++                    bits = sign | 0x7f800000U | (mant << 13);
++                } else {
++                    bits = sign | ((exp + 112U) << 23) | (mant << 13);
++                }
++                return as_float(bits);
++            }
++            inline ushort float_to_half(float f) {
++                uint x = as_uint(f);
++                uint sign = (x >> 16) & 0x8000U;
++                int e = (int)((x >> 23) & 0xffU) - 127 + 15;
++                uint mant = x & 0x7fffffU;
++                if (e <= 0) {
++                    if (e < -10) return (ushort)sign;
++                    mant |= 0x800000U;
++                    int shift = 14 - e;
++                    uint result = mant >> shift;
++                    uint rem = mant & (((uint)1 << shift) - 1U);
++                    uint halfway = (uint)1 << (shift - 1);
++                    if (rem > halfway || (rem == halfway && (result & 1U))) ++result;
++                    return (ushort)(sign | result);
++                }
++                if (e >= 31) {
++                    if (((x >> 23) & 0xffU) == 0xffU && mant != 0) return (ushort)(sign | 0x7e00U);
++                    return (ushort)(sign | 0x7c00U);
++                }
++                uint result = mant >> 13;
++                uint rem = mant & 0x1fffU;
++                if (rem > 0x1000U || (rem == 0x1000U && (result & 1U))) {
++                    ++result;
++                    if (result == 0x400U) { result = 0; ++e; }
++                }
++                if (e >= 31) return (ushort)(sign | 0x7c00U);
++                return (ushort)(sign | ((uint)e << 10) | result);
++            }
++            __kernel void ggml_f32_matmul(
++                __global const char * a, ulong oa,
++                __global const float * b, ulong ob,
++                __global float * c, ulong oc,
++                int k, int m, int n, int a_is_f16) {
++                const uint lx = get_local_id(0), ly = get_local_id(1);
++                const ulong row = (ulong)get_group_id(0) * 16 + lx;
++                const ulong col = (ulong)get_group_id(1) * 16 + ly;
++                __local float a_tile[16][16];
++                __local float b_tile[16][16];
++                __global float * cr = (__global float *)((__global char *)c + oc);
++                __global const float * ap32 = (__global const float *)((__global const char *)a + oa);
++                __global const ushort * ap16 = (__global const ushort *)((__global const char *)a + oa);
++                __global const float * bp = (__global const float *)((__global const char *)b + ob);
++                float sum = 0.0f;
++                for (uint tile = 0; tile < ((uint)k + 15) / 16; ++tile) {
++                    const ulong ak = (ulong)tile * 16 + ly;
++                    const ulong bk = (ulong)tile * 16 + lx;
++                    const ulong a_index = row * (ulong)k + ak;
++                    a_tile[lx][ly] = (row < (ulong)m && ak < (ulong)k)
++                        ? (a_is_f16 ? half_to_float(ap16[a_index]) : ap32[a_index])
++                        : 0.0f;
++                    b_tile[lx][ly] = (bk < (ulong)k && col < (ulong)n) ? bp[col * (ulong)k + bk] : 0.0f;
++                    barrier(CLK_LOCAL_MEM_FENCE);
++                    for (uint q = 0; q < 16; ++q) sum = fma(a_tile[lx][q], b_tile[q][ly], sum);
++                    barrier(CLK_LOCAL_MEM_FENCE);
++                }
++                if (row < (ulong)m && col < (ulong)n) cr[col * (ulong)m + row] = sum;
++            }
++            __kernel void ggml_f32_copy(
++                __global const char * a, ulong oa,
++                __global char * b, ulong ob,
++                ulong na0, ulong na1, ulong na2, ulong na3,
++                ulong nb0, ulong nb1, ulong nb2, ulong nb3,
++                ulong ea0, ulong ea1, ulong ea2, ulong ea3,
++                ulong eb0, ulong eb1, ulong eb2, ulong eb3,
++                int type_a, int type_b) {
++                ulong idx = get_global_id(0);
++                const ulong count = ea0 * ea1 * ea2 * ea3;
++                if (idx >= count) return;
++                ulong ai = idx, bi = idx;
++                const ulong a0 = ai % ea0; ai /= ea0;
++                const ulong a1 = ai % ea1; ai /= ea1;
++                const ulong a2 = ai % ea2; ai /= ea2;
++                const ulong a3 = ai;
++                const ulong b0 = bi % eb0; bi /= eb0;
++                const ulong b1 = bi % eb1; bi /= eb1;
++                const ulong b2 = bi % eb2; bi /= eb2;
++                const ulong b3 = bi;
++                const ulong ao = oa + a0*na0 + a1*na1 + a2*na2 + a3*na3;
++                const ulong bo = ob + b0*nb0 + b1*nb1 + b2*nb2 + b3*nb3;
++                const float value = type_a == 1
++                    ? half_to_float(*((__global const ushort *)(a + ao)))
++                    : *((__global const float *)(a + ao));
++                if (type_b == 1) *((__global ushort *)(b + bo)) = float_to_half(value);
++                else *((__global float *)(b + bo)) = value;
++            }
++        )CLC";
++        cl_program program = build_program_from_source(backend_ctx, source, compile_opts);
++        CL_CHECK((backend_ctx->kernel_f32_generic_matmul = clCreateKernel(program, "ggml_f32_matmul", &err), err));
++        CL_CHECK((backend_ctx->kernel_f32_generic_copy = clCreateKernel(program, "ggml_f32_copy", &err), err));
++        CL_CHECK(clReleaseProgram(program));
++        backend_ctx->kernels_loaded = true;
++        GGML_LOG_INFO("ggml_opencl: using subgroup-free F32 matrix multiplication fallback\n");
++        return;
++    }
++
+     // add
+     {
+ #ifdef GGML_OPENCL_EMBED_KERNELS
+@@ -7282,8 +7452,10 @@ static std::vector<ggml_backend_device> ggml_opencl_probe_devices(ggml_backend_r
+             exit(1);
+         }
+         default_device      = &platform->devices[user_device_number];
+-        candidate_devices   = platform->devices;
+-        n_candidate_devices = platform->n_devices;
++        // When both are explicitly selected, probe only that device. This also
++        // prevents experimental AMD tests from initializing the primary GPU.
++        candidate_devices   = default_device;
++        n_candidate_devices = 1;
+     } else {
+         // Choose a platform by matching a substring.
+         if (user_platform_number == -1 && user_platform_string != NULL && user_platform_string[0] != 0) {
+@@ -7436,6 +7608,7 @@ static void ggml_opencl_print_backend_info(ggml_backend_opencl_device_context *
+         backend_ctx->image2d_max_width, backend_ctx->image2d_max_height);
+     GGML_LOG_INFO("ggml_opencl: device max workgroup size: %zu\n",
+         backend_ctx->max_workgroup_size);
++#if CL_TARGET_OPENCL_VERSION >= 200
+     GGML_LOG_INFO("ggml_opencl: SVM coarse grain buffer support: %s\n",
+         backend_ctx->svm_caps & CL_DEVICE_SVM_COARSE_GRAIN_BUFFER ? "true" : "false");
+     GGML_LOG_INFO("ggml_opencl: SVM fine grain buffer support: %s\n",
+@@ -7444,6 +7617,9 @@ static void ggml_opencl_print_backend_info(ggml_backend_opencl_device_context *
+         backend_ctx->svm_caps & CL_DEVICE_SVM_FINE_GRAIN_SYSTEM ? "true" : "false");
+     GGML_LOG_INFO("ggml_opencl: SVM atomics support: %s\n",
+         backend_ctx->svm_caps & CL_DEVICE_SVM_ATOMICS ? "true" : "false");
++#else
++    GGML_LOG_INFO("ggml_opencl: SVM unavailable (OpenCL 1.2 runtime)\n");
++#endif
+     GGML_LOG_INFO("ggml_opencl: cl_qcom_subgroup_shuffle support: %s\n",
+         backend_ctx->has_qcom_subgroup_shuffle ? "true" : "false");
+ 
+@@ -7496,17 +7672,16 @@ static bool ggml_opencl_is_device_supported(ggml_backend_dev_t dev) {
+     } else if (strstr(dev_ctx->device_name.c_str(), "Intel")) {
+         dev_ctx->gpu_family = GPU_FAMILY::INTEL;
+     } else {
+-        GGML_LOG_WARN("ggml_opencl: unsupported GPU '%s'.\n", dev_ctx->device_name.c_str());
++        GGML_LOG_WARN("ggml_opencl: using generic kernels for unclassified GPU '%s'.\n", dev_ctx->device_name.c_str());
+         dev_ctx->gpu_family = GPU_FAMILY::UNKNOWN;
+-        return false;
+     }
+ 
+     ggml_cl_version platform_version = get_opencl_platform_version(dev_ctx->platform);
+ 
+-    // Check device OpenCL version, OpenCL 2.0 or above is required
++    // Apple macOS exposes OpenCL 1.2. The generic kernels avoid 2.x-only APIs.
+     ggml_cl_version opencl_c_version = get_opencl_c_version(platform_version, dev_ctx->device);
+-    if (opencl_c_version.major < 2) {
+-        GGML_LOG_WARN("ggml_opencl: OpenCL 2.0 or above is required\n");
++    if (opencl_c_version.major < 1 || (opencl_c_version.major == 1 && opencl_c_version.minor < 2)) {
++        GGML_LOG_WARN("ggml_opencl: OpenCL C 1.2 or above is required\n");
+         return false;
+     }
+ 
+@@ -7528,8 +7703,7 @@ static bool ggml_opencl_is_device_supported(ggml_backend_dev_t dev) {
+     // Check if ext_buffer contains cl_khr_fp16
+     bool fp16_support = strstr(ext_buffer.data(), "cl_khr_fp16") != NULL;
+     if (!fp16_support) {
+-        GGML_LOG_WARN("ggml_opencl: device does not support FP16\n");
+-        return false;
++        GGML_LOG_WARN("ggml_opencl: device has no cl_khr_fp16; attempting the F32 fallback path\n");
+     }
+ 
+     // If OpenCL 3.0 is supported, then check for cl_khr_subgroups, which becomes
+@@ -7660,7 +7834,11 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE2D_MAX_WIDTH, sizeof(size_t), &backend_ctx->image2d_max_width, NULL));
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_IMAGE2D_MAX_HEIGHT, sizeof(size_t), &backend_ctx->image2d_max_height, NULL));
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_MAX_WORK_GROUP_SIZE, sizeof(size_t), &backend_ctx->max_workgroup_size, NULL));
++#if CL_TARGET_OPENCL_VERSION >= 200
+     CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_SVM_CAPABILITIES, sizeof(cl_device_svm_capabilities), &backend_ctx->svm_caps, 0));
++#else
++    backend_ctx->svm_caps = 0;
++#endif
+ 
+     if (opencl_c_version.major >= 3) {
+         // Assume it is not available for 3.0, since it is optional in 3.0.
+@@ -7670,10 +7848,12 @@ static ggml_backend_opencl_context * ggml_cl_init(ggml_backend_dev_t dev) {
+         CL_CHECK(clGetDeviceInfo(device, CL_DEVICE_NON_UNIFORM_WORK_GROUP_SUPPORT, sizeof(cl_bool),
+                                  &backend_ctx->non_uniform_workgroups, 0));
+ #endif
+-    } else {
+-        GGML_ASSERT(opencl_c_version.major == 2);
++    } else if (opencl_c_version.major == 2) {
+         // Non-uniform workgroup sizes is mandatory feature in v2.x.
+         backend_ctx->non_uniform_workgroups = true;
++    } else {
++        // OpenCL 1.2 requires uniform workgroup dimensions.
++        backend_ctx->non_uniform_workgroups = false;
+     }
+ 
+ #ifdef GGML_OPENCL_USE_ADRENO_KERNELS
+@@ -9844,6 +10024,34 @@ static bool ggml_opencl_supports_op(ggml_backend_dev_t dev, const struct ggml_te
+     ggml_backend_opencl_device_context * dev_ctx     = (ggml_backend_opencl_device_context *)dev->context;
+     ggml_backend_opencl_context *        backend_ctx = dev_ctx->backend_ctx;
+ 
++    if (!backend_ctx->fp16_support) {
++        // The OpenCL 1.2 fallback supports F32 and software-converted F16
++        // weights for matrix products. Do not advertise upstream kernels that
++        // require subgroup intrinsics or native FP16 arithmetic.
++        if (op->op == GGML_OP_NONE || op->op == GGML_OP_RESHAPE ||
++            op->op == GGML_OP_VIEW || op->op == GGML_OP_PERMUTE ||
++            op->op == GGML_OP_TRANSPOSE) return true;
++        if (op->op == GGML_OP_CPY) {
++            const bool supported = op->src[0] && op->src[1] &&
++                (op->src[0]->type == GGML_TYPE_F32 || op->src[0]->type == GGML_TYPE_F16) &&
++                (op->src[1]->type == GGML_TYPE_F32 || op->src[1]->type == GGML_TYPE_F16) &&
++                op->type == op->src[1]->type &&
++                ggml_nelements(op->src[0]) == ggml_nelements(op->src[1]);
++            return supported;
++        }
++        if (op->op != GGML_OP_MUL_MAT || op->type != GGML_TYPE_F32 ||
++            !op->src[0] || !op->src[1] ||
++            (op->src[0]->type != GGML_TYPE_F32 && op->src[0]->type != GGML_TYPE_F16) ||
++            op->src[1]->type != GGML_TYPE_F32 ||
++            !ggml_is_contiguous(op->src[0]) || !ggml_is_contiguous(op->src[1]) ||
++            !ggml_is_contiguous(op) ||
++            op->src[0]->ne[2] != 1 || op->src[0]->ne[3] != 1 ||
++            op->src[1]->ne[2] != 1 || op->src[1]->ne[3] != 1) {
++            return false;
++        }
++        return true;
++    }
++
+     // reject ops that match the opfilter regex
+     if (dev_ctx->opfilter && std::regex_match(std::string(ggml_op_desc(op)), *dev_ctx->opfilter)) {
+         return false;
+@@ -14222,10 +14430,19 @@ static size_t ggml_backend_opencl_buffer_type_get_alignment(ggml_backend_buffer_
+ }
+ 
+ static size_t ggml_backend_opencl_buffer_type_get_max_size(ggml_backend_buffer_type_t buffer_type) {
+-    static size_t max_size = -1;
+-    if (max_size == (size_t)-1) {
+-        ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
+-        max_size = dev_ctx->backend_ctx->max_alloc_size;
++    ggml_backend_opencl_device_context * dev_ctx = (ggml_backend_opencl_device_context *) buffer_type->device->context;
++    size_t max_size = dev_ctx->backend_ctx->max_alloc_size;
++    if (!dev_ctx->backend_ctx->fp16_support) {
++        // The Apple AMD OpenCL 1.2 driver aborts its client on clFinish when a
++        // kernel touches a near-4-GiB allocation (reproduced with the same
++        // matrix kernel on Vega). Split ggml model buffers into smaller pieces;
++        // 512 MiB still holds Whisper's largest single F32 tensor (~266 MB).
++        size_t chunk_size = 512ULL * 1024 * 1024;
++        if (const char * env = getenv("GGML_OPENCL_F32_BUFFER_MB")) {
++            const long mb = strtol(env, nullptr, 10);
++            if (mb >= 320 && mb <= 2048) chunk_size = (size_t)mb * 1024 * 1024;
++        }
++        max_size = std::min(max_size, chunk_size);
+     }
+     return max_size;
+ }
+@@ -14333,6 +14550,9 @@ static ggml_backend_t ggml_backend_opencl_device_init(ggml_backend_dev_t dev, co
+ 
+ static ggml_backend_buffer_type_t ggml_backend_opencl_device_get_buffer_type(ggml_backend_dev_t dev) {
+     auto * dev_ctx = static_cast<ggml_backend_opencl_device_context *>(dev->context);
++    // Buffer alignment and size callbacks dereference backend_ctx; initialize it
++    // before the graph allocator queries this buffer type during model loading.
++    ggml_cl_init(dev);
+ 
+     dev_ctx->buffer_type = ggml_backend_buffer_type{
+         /* .iface   = */ ggml_backend_opencl_buffer_type_interface,
+@@ -25575,6 +25795,59 @@ static void ggml_cl_mul_mat(ggml_backend_t backend, const ggml_tensor * src0, co
+ 
+     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+ 
++    if (!backend_ctx->fp16_support) {
++        GGML_ASSERT((src0t == GGML_TYPE_F32 || src0t == GGML_TYPE_F16) &&
++                    src1t == GGML_TYPE_F32 && dst->type == GGML_TYPE_F32);
++        GGML_ASSERT(ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst));
++        GGML_ASSERT(src0->ne[2] == 1 && src0->ne[3] == 1 && src1->ne[2] == 1 && src1->ne[3] == 1);
++
++        auto * extra0 = (ggml_tensor_extra_cl *)src0->extra;
++        auto * extra1 = (ggml_tensor_extra_cl *)src1->extra;
++        auto * extrad = (ggml_tensor_extra_cl *)dst->extra;
++        const cl_ulong offset0 = extra0->offset + src0->view_offs;
++        const cl_ulong offset1 = extra1->offset + src1->view_offs;
++        const cl_ulong offsetd = extrad->offset + dst->view_offs;
++        const int k = (int)src0->ne[0];
++        const int m = (int)src0->ne[1];
++        const int n = (int)src1->ne[1];
++        size_t size0 = 0, size1 = 0, sized = 0;
++        CL_CHECK(clGetMemObjectInfo(extra0->data_device, CL_MEM_SIZE, sizeof(size0), &size0, nullptr));
++        CL_CHECK(clGetMemObjectInfo(extra1->data_device, CL_MEM_SIZE, sizeof(size1), &size1, nullptr));
++        CL_CHECK(clGetMemObjectInfo(extrad->data_device, CL_MEM_SIZE, sizeof(sized), &sized, nullptr));
++        const size_t bytes0 = ggml_nbytes(src0), bytes1 = ggml_nbytes(src1), bytesd = ggml_nbytes(dst);
++        if (offset0 > size0 || bytes0 > size0 - offset0 ||
++            offset1 > size1 || bytes1 > size1 - offset1 ||
++            offsetd > sized || bytesd > sized - offsetd) {
++            GGML_LOG_ERROR("ggml_opencl: F32 matmul buffer range invalid: A=%llu+%zu/%zu B=%llu+%zu/%zu C=%llu+%zu/%zu\n",
++                (unsigned long long)offset0, bytes0, size0, (unsigned long long)offset1, bytes1, size1,
++                (unsigned long long)offsetd, bytesd, sized);
++            GGML_ABORT("OpenCL F32 fallback buffer range invalid");
++        }
++        cl_kernel kernel = backend_ctx->kernel_f32_generic_matmul;
++        CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &extra0->data_device));
++        CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_ulong), &offset0));
++        CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra1->data_device));
++        CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_ulong), &offset1));
++        CL_CHECK(clSetKernelArg(kernel, 4, sizeof(cl_mem), &extrad->data_device));
++        CL_CHECK(clSetKernelArg(kernel, 5, sizeof(cl_ulong), &offsetd));
++        CL_CHECK(clSetKernelArg(kernel, 6, sizeof(int), &k));
++        CL_CHECK(clSetKernelArg(kernel, 7, sizeof(int), &m));
++        CL_CHECK(clSetKernelArg(kernel, 8, sizeof(int), &n));
++        const int a_is_f16 = src0t == GGML_TYPE_F16 ? 1 : 0;
++        CL_CHECK(clSetKernelArg(kernel, 9, sizeof(int), &a_is_f16));
++        const size_t local_work_size[] = {16, 16};
++        const size_t global_work_size[] = {
++            (size_t)((m + 15) / 16 * 16), (size_t)((n + 15) / 16 * 16)
++        };
++        static const bool trace_f32 = getenv("GGML_OPENCL_F32_FALLBACK_TRACE") != nullptr;
++        if (trace_f32) GGML_LOG_INFO("ggml_opencl: F32 tiled matmul weights=%s k=%d m=%d n=%d buffers=%zu/%zu/%zu offsets=%llu/%llu/%llu\n",
++            a_is_f16 ? "F16" : "F32", k, m, n, size0, size1, sized, (unsigned long long)offset0,
++            (unsigned long long)offset1, (unsigned long long)offsetd);
++        CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 2, NULL, global_work_size, local_work_size, 0, NULL, NULL));
++        CL_CHECK(clFinish(backend_ctx->queue));
++        return;
++    }
++
+     // quant kv without FA
+     // used for non-contiguous src0 (the usual head-major permuted K view when n_head_kv>1)
+     // AND for the contiguous case that occurs when n_head_kv==1 (e.g. Gemma-4 E2B)
+@@ -30766,6 +31039,58 @@ static void ggml_cl_cpy(ggml_backend_t backend, const ggml_tensor * src0, const
+ 
+     ggml_backend_opencl_context *backend_ctx = (ggml_backend_opencl_context *)backend->context;
+ 
++    if (!backend_ctx->fp16_support) {
++        GGML_ASSERT((src0t == GGML_TYPE_F32 || src0t == GGML_TYPE_F16) &&
++                    (src1t == GGML_TYPE_F32 || src1t == GGML_TYPE_F16));
++        GGML_ASSERT(ggml_nelements(src0) == ggml_nelements(src1));
++        auto * extra0 = (ggml_tensor_extra_cl *)src0->extra;
++        auto * extra1 = (ggml_tensor_extra_cl *)src1->extra;
++        const cl_ulong offset0 = extra0->offset + src0->view_offs;
++        const cl_ulong offset1 = extra1->offset + src1->view_offs;
++        const cl_ulong ea0 = (cl_ulong)src0->ne[0], ea1 = (cl_ulong)src0->ne[1];
++        const cl_ulong ea2 = (cl_ulong)src0->ne[2], ea3 = (cl_ulong)src0->ne[3];
++        const cl_ulong eb0 = (cl_ulong)src1->ne[0], eb1 = (cl_ulong)src1->ne[1];
++        const cl_ulong eb2 = (cl_ulong)src1->ne[2], eb3 = (cl_ulong)src1->ne[3];
++        const cl_ulong nb00 = (cl_ulong)src0->nb[0], nb01 = (cl_ulong)src0->nb[1];
++        const cl_ulong nb02 = (cl_ulong)src0->nb[2], nb03 = (cl_ulong)src0->nb[3];
++        const cl_ulong nb10 = (cl_ulong)src1->nb[0], nb11 = (cl_ulong)src1->nb[1];
++        const cl_ulong nb12 = (cl_ulong)src1->nb[2], nb13 = (cl_ulong)src1->nb[3];
++        cl_kernel kernel = backend_ctx->kernel_f32_generic_copy;
++        CL_CHECK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &extra0->data_device));
++        CL_CHECK(clSetKernelArg(kernel, 1, sizeof(cl_ulong), &offset0));
++        CL_CHECK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &extra1->data_device));
++        CL_CHECK(clSetKernelArg(kernel, 3, sizeof(cl_ulong), &offset1));
++        CL_CHECK(clSetKernelArg(kernel, 4, sizeof(cl_ulong), &nb00));
++        CL_CHECK(clSetKernelArg(kernel, 5, sizeof(cl_ulong), &nb01));
++        CL_CHECK(clSetKernelArg(kernel, 6, sizeof(cl_ulong), &nb02));
++        CL_CHECK(clSetKernelArg(kernel, 7, sizeof(cl_ulong), &nb03));
++        CL_CHECK(clSetKernelArg(kernel, 8, sizeof(cl_ulong), &nb10));
++        CL_CHECK(clSetKernelArg(kernel, 9, sizeof(cl_ulong), &nb11));
++        CL_CHECK(clSetKernelArg(kernel, 10, sizeof(cl_ulong), &nb12));
++        CL_CHECK(clSetKernelArg(kernel, 11, sizeof(cl_ulong), &nb13));
++        CL_CHECK(clSetKernelArg(kernel, 12, sizeof(cl_ulong), &ea0));
++        CL_CHECK(clSetKernelArg(kernel, 13, sizeof(cl_ulong), &ea1));
++        CL_CHECK(clSetKernelArg(kernel, 14, sizeof(cl_ulong), &ea2));
++        CL_CHECK(clSetKernelArg(kernel, 15, sizeof(cl_ulong), &ea3));
++        CL_CHECK(clSetKernelArg(kernel, 16, sizeof(cl_ulong), &eb0));
++        CL_CHECK(clSetKernelArg(kernel, 17, sizeof(cl_ulong), &eb1));
++        CL_CHECK(clSetKernelArg(kernel, 18, sizeof(cl_ulong), &eb2));
++        CL_CHECK(clSetKernelArg(kernel, 19, sizeof(cl_ulong), &eb3));
++        const int type_a = src0t == GGML_TYPE_F16 ? 1 : 0;
++        const int type_b = src1t == GGML_TYPE_F16 ? 1 : 0;
++        CL_CHECK(clSetKernelArg(kernel, 20, sizeof(int), &type_a));
++        CL_CHECK(clSetKernelArg(kernel, 21, sizeof(int), &type_b));
++        const size_t global_work_size[] = {(size_t)ggml_nelements(src0)};
++        CL_CHECK(clEnqueueNDRangeKernel(backend_ctx->queue, kernel, 1, NULL, global_work_size, NULL, 0, NULL, NULL));
++        static const bool trace_f32 = getenv("GGML_OPENCL_F32_FALLBACK_TRACE") != nullptr;
++        if (trace_f32) {
++            GGML_LOG_INFO("ggml_opencl: F32 fallback CPY queued elements=%zu types=%s->%s\n",
++                (size_t)ggml_nelements(src0), ggml_type_name(src0t), ggml_type_name(src1t));
++            CL_CHECK(clFinish(backend_ctx->queue));
++        }
++        return;
++    }
++
+     ggml_tensor_extra_cl * extra0 = (ggml_tensor_extra_cl *)src0->extra;
+     ggml_tensor_extra_cl * extra1 = (ggml_tensor_extra_cl *)src1->extra;
+ 

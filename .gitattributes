@@ -1,0 +1,2 @@
+# Patch context lines intentionally contain a leading diff marker followed by a space.
+patches/*.patch whitespace=-blank-at-eol,-blank-at-eof
