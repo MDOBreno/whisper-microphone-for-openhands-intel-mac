@@ -5,31 +5,31 @@ A local, OpenAI-compatible speech transcription service for OpenHands Agent Canv
 ## Highlights
 
 - Brazilian Portuguese and English, with automatic language detection and mixed-language audio support.
-- Multilingual Large V3 on a primary AMD GPU with at least 12 GiB VRAM; multilingual Large V3 Turbo below that threshold. Both official checkpoints use F16 weights without quantization.
+- Multilingual Large V3 on a primary AMD GPU with at least 12 GiB VRAM; full-precision Turbo from 8–12 GiB; multilingual Turbo Q8_0 on cards up to 8 GiB to preserve VRAM.
 - The OpenCL kernels compute in F32 and convert F16 weights in software, so the driver does not need `cl_khr_fp16`.
 - OpenAI-compatible `POST /v1/audio/transcriptions` endpoint on loopback only.
 - Local FFmpeg conversion for browser audio formats supported by the installed FFmpeg build.
-- Per-user `launchd` service that starts after GUI login, keeps the model loaded, and recovers from a child-process failure.
+- Per-user `launchd` service that starts after GUI login, keeps the model loaded, recovers from child-process failure, and refuses CPU-only fallback when AMD OpenCL is unavailable.
 - No cloud transcription API and no API usage charges.
 
 ## Tested host and measured behavior
 
-The machine inspected for this implementation is an Intel Mac/Hackintosh running macOS 26.7 x86_64 with an Intel Core i9-10900K. The system enumerated an AMD Radeon RX 6900 XT with 16 GB VRAM as the main-display GPU and a secondary Radeon Vega. The RX 5600 was not physically installed during the final measurements.
-On this host, the active LaunchAgent now runs the daemon and adapter from this Downloads checkout while reusing the compiled server and model files under `~/Applications/WhisperLocal`.
+The active test host inspected on 2026-11-03 is an Intel Mac/Hackintosh running macOS 26.7 (build 25G229), x86_64, Intel Core i7-10700, and 32 GB system RAM. Its main-display GPU is an AMD Radeon RX 5600 with 6 GB VRAM; a secondary AMD Radeon Vega is also present. The driver reports Metal 3, but this Whisper build deliberately uses Apple's OpenCL 1.2 runtime because earlier Metal runs on this Hackintosh caused GPU resets. The RX 5600 OpenCL tests below completed without a driver recovery. Do not describe this backend as Metal acceleration.
 
-The Apple OpenCL runtime exposes OpenCL 1.2 without `cl_khr_fp16` or subgroup extensions. A tiled F32 matmul fallback and software F16-to-F32 weight conversion were added in `patches/ggml-opencl-apple-1.2.patch`. The build disables Metal: previous Metal attempts on this Hackintosh caused GPU resets. OpenCL inference completed with an active AMD OpenCL context, GPU activity observed up to 83%, and no reset in the recorded tests. Unsupported operations may still run on CPU; this is a hybrid backend, not a claim that every operation runs on GPU.
+The Apple OpenCL runtime reports OpenCL 1.2 without `cl_khr_fp16` or subgroup operations. `patches/ggml-opencl-apple-1.2.patch` supplies tiled F32 matrix multiplication and software F16-to-F32 conversion; it also adds a Q8_0 GPU path so the small-card Turbo profile remains quantized in VRAM while multiplying in F32. Some unsupported operations remain on CPU. The daemon preflight requires logs to identify both `GPUOpenCL` and `AMD Radeon RX 5600 Compute Engine`, so an unsupported build exits instead of silently using CPU. A 19.96-second mixed test previously measured 82–89% GPU activity during inference with no GPU recovery.
 
-| Test | Observed result |
+The RX 5600 daemon selects the multilingual `large-v3-turbo-q8_0` model. Its OpenCL model allocation was 878.33 MB (model file 873.55 MB). This is GPU memory, not host RAM. In a later idle telemetry sample, `ioreg` reported 3.18 GiB total `inUseVidMemoryBytes`, around 2.72 GiB of that marked reusable by the AMD driver, about 87 MiB reported immediately free, and about 209 MiB in GPU system memory. These system-wide driver counters include display allocations and cached/reusable allocations; they do not establish a guaranteed 1.5 GiB of immediately free VRAM. Recheck them on a different display setup or while other GPU applications are open.
+
+| Test on RX 5600 | Observed result |
 |---|---|
-| Large V3 F16, mixed Portuguese/English reference audio, 21.86 s | HTTP 200 in 124.42 s; RTF 5.69; detected windows `pt, pt, pt, en`; preserved the speech order and most technical names. |
-| Turbo F16, Portuguese audio, 10 s | HTTP 200 in 21.90 s; RTF 2.19; automatic language detection returned `pt`. |
-| Large V3 F32, Portuguese WebM/Opus, 10 s | HTTP 200 in 41.32 s; local FFmpeg conversion succeeded. |
-| Reference comparison on a short locally synthesized mixed-language script | Large V3 F16: WER 1.8%, CER 0.7%. Turbo checkpoint widened from the same F16 values to F32: WER 17.9%, CER 8.2%. This is a small synthetic `say` sample, not a human-spontaneous-speech benchmark. |
-| GPU telemetry | RX 6900 XT OpenCL context active; up to 83% GPU activity. About 6.18 GB VRAM observed with Large V3 F16 and 4.41 GB with Turbo F16; process RSS was about 0.49 GB in one sample. |
-| RX 5600 memory estimate | The Turbo test used about 4.41 GB on the RX 6900 XT. A simple 6 GB minus 4.41 GB estimate leaves about 1.59 GB on an RX 5600; this margin is narrow and must be measured with the RX 5600 installed. |
-| LaunchAgent recovery | Deliberately terminated the adapter; launchd restarted the service, and one listener returned on each configured port. A full logout/reboot test was not performed. |
+| OpenCL F32 matrix smoke test | Passed on the AMD OpenCL device; maximum absolute error 0.0. |
+| Portuguese, 10.00 s, `language` omitted | HTTP 200 in 41.57 s (RTF 4.16); automatic detection selected Portuguese. Output preserved the Portuguese language and accents; this is a short synthetic sample, not a human-speech accuracy score. |
+| English, 10.00 s, `language` omitted | HTTP 200 in 41.90 s (RTF 4.19); automatic detection selected English. The short synthetic sample was mostly recognized; one technical word was rendered as “compatriot” instead of “compatible.” |
+| OpenHands UI request, 17.76 s recorded audio | The configured app sent the request to the local endpoint and received HTTP 200 in 118.02 s. The test played synthetic speech into a headset output that the headset microphone could not capture, so this validates the app-to-API path only, not natural voice accuracy. |
+| Earlier RX 6900 XT reference tests | Large V3 F16 was more accurate than Turbo F16 on a short synthesized mixed-language script (WER 1.8% vs. 17.9%; CER 0.7% vs. 8.2%). This was a small TTS sample, not a human-spontaneous-speech benchmark. The 16 GB RX 6900 XT profile remains full Large V3. |
+| LaunchAgent recovery | A child-process failure was deliberately induced; launchd recovered the service and one listener returned on each configured port. The latest daemon also passed its AMD OpenCL preflight. RunAtLoad and KeepAlive are enabled. A fresh logout/reboot test was not performed. |
 
-The full Large V3 profile is materially more accurate on the short reference test, so it is selected for the 16 GB RX 6900 XT. The smaller multilingual Turbo profile is selected for a 6 GB RX 5600 to leave VRAM available to other applications. Response time is hardware-bound and was not used as the selection gate.
+For the 6 GB RX 5600 the daemon uses Turbo Q8_0, while GPUs with at least 12 GiB use full Large V3 and 8–12 GiB GPUs use unquantized Turbo. This threshold is based on available VRAM and actual RX 5600 model-load/inference checks; it does not promise 1.5 GiB of immediately free VRAM under every display workload. The daemon matches the human-readable `sppci_model` value from `system_profiler` (for example, `AMD Radeon RX 5600`); `_name` is an internal token such as `kHW_AMDRadeonRX5600Item` and cannot be passed as an OpenCL device name.
 
 ## Repository layout
 
@@ -74,14 +74,14 @@ git clone --recurse-submodules https://github.com/MDOBreno/whisper-microphone-fo
 cd "Whisper Microphone for OpenHands on Intel Mac"
 ```
 
-Build the patched x86_64 OpenCL server and download the two multilingual models:
+Build the patched x86_64 OpenCL server and download the three multilingual model profiles:
 
 ```zsh
 ./scripts/build-whisper.sh
 ./scripts/download-models.sh
 ```
 
-The Large V3 checkpoint is several GB and the Turbo checkpoint is smaller. Do not commit files from `models/`.
+The Large V3 checkpoint is several GB, while the Turbo Q8_0 checkpoint is the small-card profile. Do not commit files from `models/`.
 
 Install the per-user LaunchAgent. By default, the project itself is used for models and build output:
 
@@ -90,7 +90,7 @@ Install the per-user LaunchAgent. By default, the project itself is used for mod
 ./scripts/install-cli.sh
 ```
 
-To keep build/model assets in a separate location, set `WHISPER_RUNTIME_ROOT` to that directory before installing. The runtime root must contain both model files and a built server under `build/opencl120/bin/` or `build-opencl120/bin/`.
+To keep model and log assets in a separate location, set `WHISPER_RUNTIME_ROOT` to that directory before installing. The LaunchAgent uses a server built in this checkout first, then falls back to a server under the runtime root.
 
 ## OpenHands settings
 

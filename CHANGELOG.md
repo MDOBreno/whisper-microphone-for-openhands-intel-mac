@@ -2,7 +2,10 @@
 
 ## Unreleased
 
-- No changes yet.
+- Select AMD OpenCL devices by their human-readable `system_profiler` model name, fixing RX 5600 startup.
+- Add the multilingual Turbo Q8_0 profile and its OpenCL 1.2 F32 GPU fallback for cards up to 8 GiB.
+- Require all three model profiles during installation and download the Q8_0 checkpoint.
+- Record RX 5600 API, language-detection, memory, and OpenHands integration measurements.
 
 ## 0.1.0 - 2026-11-01
 

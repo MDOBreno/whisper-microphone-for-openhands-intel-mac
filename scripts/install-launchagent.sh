@@ -10,13 +10,18 @@ TEMPLATE="$PROJECT_ROOT/config/local.whisper.openai.plist.in"
 
 server="${WHISPER_SERVER_PATH:-}"
 if [[ -z "$server" ]]; then
-  for candidate in "$RUNTIME_ROOT/build-opencl120/bin/whisper-server" "$RUNTIME_ROOT/build/opencl120/bin/whisper-server"; do
+  for candidate in \
+    "$PROJECT_ROOT/build/opencl120/bin/whisper-server" \
+    "$PROJECT_ROOT/build-opencl120/bin/whisper-server" \
+    "$RUNTIME_ROOT/build-opencl120/bin/whisper-server" \
+    "$RUNTIME_ROOT/build/opencl120/bin/whisper-server"; do
     if [[ -x "$candidate" ]]; then server="$candidate"; break; fi
   done
 fi
-[[ -x "$server" ]] || { echo "whisper-server not found under $RUNTIME_ROOT; build it first." >&2; exit 1; }
+[[ -x "$server" ]] || { echo "whisper-server not found under $PROJECT_ROOT or $RUNTIME_ROOT; build it first." >&2; exit 1; }
 [[ -s "$RUNTIME_ROOT/models/ggml-large-v3.bin" ]] || { echo "Missing Large V3 model under $RUNTIME_ROOT/models." >&2; exit 1; }
 [[ -s "$RUNTIME_ROOT/models/ggml-large-v3-turbo.bin" ]] || { echo "Missing Large V3 Turbo model under $RUNTIME_ROOT/models." >&2; exit 1; }
+[[ -s "$RUNTIME_ROOT/models/ggml-large-v3-turbo-q8_0.bin" ]] || { echo "Missing multilingual Large V3 Turbo Q8_0 model under $RUNTIME_ROOT/models." >&2; exit 1; }
 mkdir -p "$AGENT_DIR" "$RUNTIME_ROOT/logs"
 
 backup=""

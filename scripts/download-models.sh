@@ -9,4 +9,5 @@ fi
 mkdir -p "$MODEL_DIR"
 "$DOWNLOAD_SCRIPT" large-v3 "$MODEL_DIR"
 "$DOWNLOAD_SCRIPT" large-v3-turbo "$MODEL_DIR"
-echo "Downloaded multilingual Large V3 and Large V3 Turbo into $MODEL_DIR."
+"$DOWNLOAD_SCRIPT" large-v3-turbo-q8_0 "$MODEL_DIR"
+echo "Downloaded multilingual Large V3, Large V3 Turbo, and Q8_0 Turbo into $MODEL_DIR."
