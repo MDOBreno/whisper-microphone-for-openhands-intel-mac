@@ -90,6 +90,8 @@ Install the per-user LaunchAgent. By default, the project itself is used for mod
 ./scripts/install-cli.sh
 ```
 
+The CLI installer adds its directory to interactive Zsh sessions. In a terminal that is already open, run `source ~/.zshrc && rehash` once, or open a new terminal.
+
 To keep model and log assets in a separate location, set `WHISPER_RUNTIME_ROOT` to that directory before installing. The LaunchAgent uses a server built in this checkout first, then falls back to a server under the runtime root.
 
 ## OpenHands settings

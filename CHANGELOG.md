@@ -6,6 +6,7 @@
 - Add the multilingual Turbo Q8_0 profile and its OpenCL 1.2 F32 GPU fallback for cards up to 8 GiB.
 - Require all three model profiles during installation and download the Q8_0 checkpoint.
 - Record RX 5600 API, language-detection, memory, and OpenHands integration measurements.
+- Add the Whisper command directory to interactive Zsh sessions during CLI installation.
 
 ## 0.1.0 - 2026-11-01
 
