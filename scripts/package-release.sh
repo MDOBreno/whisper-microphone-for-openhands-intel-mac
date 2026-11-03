@@ -21,6 +21,7 @@ tar -czf "$tmp" \
   --exclude='./models/*' \
   --exclude='./logs/*' \
   --exclude='./tests/data/*' \
+  --exclude='__pycache__' \
   --exclude='*.pyc' \
   -C "$PROJECT_ROOT" .
 mv "$tmp" "$archive"
