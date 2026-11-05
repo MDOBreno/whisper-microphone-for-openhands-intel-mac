@@ -17,17 +17,15 @@ LARGE_MODEL="$RUNTIME_ROOT/models/ggml-large-v3.bin"
 TURBO_MODEL="$RUNTIME_ROOT/models/ggml-large-v3-turbo.bin"
 TURBO_Q8_MODEL="$RUNTIME_ROOT/models/ggml-large-v3-turbo-q8_0.bin"
 
-# This build has Metal disabled. The LaunchAgent runs after GUI login, when
-# the interactive display GPU is available. Select the OpenCL device attached
-# to the main display; an explicit GGML_OPENCL_DEVICE still overrides this for
-# controlled tests (for example, selecting the secondary Vega by device index).
+# This build uses Apple's OpenCL 1.2 runtime. Select one of the supported
+# discrete Radeon cards dynamically. In particular, do not treat the Vega's
+# shared system memory as VRAM: RX 6900 XT uses Large V3, while RX 5600 uses
+# multilingual Turbo Q8_0 to leave most of its 6 GiB available to other apps.
 export GGML_OPENCL_PLATFORM="${GGML_OPENCL_PLATFORM:-0}"
 gpu_info=$(
   /usr/sbin/system_profiler SPDisplaysDataType -json 2>/dev/null |
-    /usr/bin/python3 -c 'import json,re,sys; data=json.load(sys.stdin); gpus=data.get("SPDisplaysDataType", []); g=next((g for g in gpus if any(d.get("spdisplays_main") == "spdisplays_yes" for d in g.get("spdisplays_ndrvs", []))), None); raw=(g or {}).get("spdisplays_vram", ""); m=re.search(r"([0-9.]+)\s*GB", raw, re.I); print("{}\t{}".format((g or {}).get("sppci_model") or (g or {}).get("_name", "AMD Radeon"), int(float(m.group(1))*1024**3) if m else 0))' \
-    2>/dev/null || true
-)
-if [[ -z "$gpu_info" ]]; then gpu_info=$'AMD Radeon\t0'; fi
+    /usr/bin/python3 "$PROJECT_ROOT/scripts/select-amd-gpu.py"
+) || { print -u2 "WhisperLocal cannot select a supported discrete AMD GPU; refusing CPU-only fallback."; exit 78; }
 main_gpu="${gpu_info%%$'\t'*}"
 gpu_vram_bytes="${gpu_info##*$'\t'}"
 if ! [[ "$gpu_vram_bytes" =~ '^[0-9]+$' ]]; then gpu_vram_bytes=0; fi

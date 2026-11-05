@@ -7,6 +7,8 @@
 - Require all three model profiles during installation and download the Q8_0 checkpoint.
 - Record RX 5600 API, language-detection, memory, and OpenHands integration measurements.
 - Add the Whisper command directory to interactive Zsh sessions during CLI installation.
+- Add a one-click OpenHands updater that verifies official GitHub release hashes, repairs microphone signing/usage metadata, and installs a per-user update watcher.
+- Select only the RX 6900 XT or RX 5600 for OpenCL and ignore the integrated Vega's shared-memory figure when choosing the Whisper model profile.
 
 ## 0.1.0 - 2026-11-01
 

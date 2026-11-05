@@ -11,6 +11,7 @@ build/opencl120/*
 release/*
 !release/.gitkeep
 !release/README.md
+!release/Repair OpenHands Microphone.command
 
 # Whisper weights and runtime logs are not source artifacts.
 models/*

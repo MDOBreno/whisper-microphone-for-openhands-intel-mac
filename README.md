@@ -10,6 +10,7 @@ A local, OpenAI-compatible speech transcription service for OpenHands Agent Canv
 - OpenAI-compatible `POST /v1/audio/transcriptions` endpoint on loopback only.
 - Local FFmpeg conversion for browser audio formats supported by the installed FFmpeg build.
 - Per-user `launchd` service that starts after GUI login, keeps the model loaded, recovers from child-process failure, and refuses CPU-only fallback when AMD OpenCL is unavailable.
+- Runtime GPU selection limited to the supported RX 6900 XT and RX 5600; the integrated Vega's shared memory is not mistaken for dedicated VRAM.
 - No cloud transcription API and no API usage charges.
 
 ## Tested host and measured behavior
@@ -20,6 +21,8 @@ The Apple OpenCL runtime reports OpenCL 1.2 without `cl_khr_fp16` or subgroup op
 
 The RX 5600 daemon selects the multilingual `large-v3-turbo-q8_0` model. Its OpenCL model allocation was 878.33 MB (model file 873.55 MB). This is GPU memory, not host RAM. In a later idle telemetry sample, `ioreg` reported 3.18 GiB total `inUseVidMemoryBytes`, around 2.72 GiB of that marked reusable by the AMD driver, about 87 MiB reported immediately free, and about 209 MiB in GPU system memory. These system-wide driver counters include display allocations and cached/reusable allocations; they do not establish a guaranteed 1.5 GiB of immediately free VRAM. Recheck them on a different display setup or while other GPU applications are open.
 
+On 2026-11-05, the other boot of this SSD reported macOS 26.7 (build 25G229), Intel Core i9, Radeon RX 6900 XT with 16 GiB VRAM, and an integrated Radeon Vega reporting 32 GB shared memory. The runtime selector chose the RX 6900 XT and Large V3; it ignored the Vega memory figure. The RX 5600 + Vega case was checked with the same `system_profiler` parsing logic and selected the 6 GiB RX 5600 / Turbo Q8_0 profile. The active Whisper service on this boot reported `whisper.cpp/OpenCL AMD Radeon RX 6900 XT`.
+
 | Test on RX 5600 | Observed result |
 |---|---|
 | OpenCL F32 matrix smoke test | Passed on the AMD OpenCL device; maximum absolute error 0.0. |
@@ -27,9 +30,12 @@ The RX 5600 daemon selects the multilingual `large-v3-turbo-q8_0` model. Its Ope
 | English, 10.00 s, `language` omitted | HTTP 200 in 41.90 s (RTF 4.19); automatic detection selected English. The short synthetic sample was mostly recognized; one technical word was rendered as “compatriot” instead of “compatible.” |
 | OpenHands UI request, 17.76 s recorded audio | The configured app sent the request to the local endpoint and received HTTP 200 in 118.02 s. The test played synthetic speech into a headset output that the headset microphone could not capture, so this validates the app-to-API path only, not natural voice accuracy. |
 | Earlier RX 6900 XT reference tests | Large V3 F16 was more accurate than Turbo F16 on a short synthesized mixed-language script (WER 1.8% vs. 17.9%; CER 0.7% vs. 8.2%). This was a small TTS sample, not a human-spontaneous-speech benchmark. The 16 GB RX 6900 XT profile remains full Large V3. |
+| OpenHands repair on RX 6900 XT (2026-11-05) | Installed OpenHands 1.35.0 matched the latest official stable release. Local Apple Development signing passed `codesign --verify --deep --strict`; the main app and Electron Renderer helper carry the audio-input entitlement, and the Renderer helper has `NSMicrophoneUsageDescription`. The microphone TCC grant was renewed for the newly signed bundle. Voice Input settings in the running app showed `http://127.0.0.1:8765/v1`, blank API key, and `whisper-1`. The user-provided 5.7 s M4A returned the expected mixed-language sentence through the local API in 29.04 s. A direct Electron capture exercised the local endpoint, but playing the sample through the current speaker did not route intelligible speech into the PD200X microphone, so this run does not claim an end-to-end spoken-text match from the physical mic. |
 | LaunchAgent recovery | A child-process failure was deliberately induced; launchd recovered the service and one listener returned on each configured port. The latest daemon also passed its AMD OpenCL preflight. RunAtLoad and KeepAlive are enabled. A fresh logout/reboot test was not performed. |
 
 For the 6 GB RX 5600 the daemon uses Turbo Q8_0, while GPUs with at least 12 GiB use full Large V3 and 8–12 GiB GPUs use unquantized Turbo. This threshold is based on available VRAM and actual RX 5600 model-load/inference checks; it does not promise 1.5 GiB of immediately free VRAM under every display workload. The daemon matches the human-readable `sppci_model` value from `system_profiler` (for example, `AMD Radeon RX 5600`); `_name` is an internal token such as `kHW_AMDRadeonRX5600Item` and cannot be passed as an OpenCL device name.
+
+The daemon now examines all GPUs reported by `system_profiler`, prefers a supported RX card driving the main display, and otherwise chooses the supported RX card with the most VRAM. It deliberately ignores the Radeon Vega's 32 GB shared-memory figure. `scripts/select-amd-gpu.py` contains this selection logic; the daemon's startup preflight still requires the selected AMD OpenCL device and refuses to continue on CPU alone.
 
 ## Repository layout
 
@@ -102,7 +108,24 @@ In OpenHands Agent Canvas, open **Settings → Application → Voice input** and
 - **Transcription API Key:** leave blank
 - **Transcription Model:** `whisper-1`
 
-The OpenHands UI appends `/audio/transcriptions` to the base URL. Microphone capture still requires macOS microphone permission for the Electron app. The tested local installation has the `com.apple.security.device.audio-input` entitlement and a TCC microphone grant. The entitlement file here is an example for signing an app you own; this repository does not alter or re-sign OpenHands.
+The OpenHands UI appends `/audio/transcriptions` to the base URL. Microphone capture still requires macOS microphone permission for the Electron app. The optional one-click repair below adds the `com.apple.security.device.audio-input` entitlement and Renderer usage description to the installed OpenHands bundle, then signs that local copy with the user's Apple Development identity. The entitlement plist is an example for this local repair; the Whisper installer by itself does not change OpenHands.
+
+## One-click OpenHands updater and microphone repair
+
+On macOS, the installed double-click utility is `~/Applications/WhisperLocal/Repair OpenHands Microphone.command`. The source version is `release/Repair OpenHands Microphone.command` in this repository. Terminal opens to show progress. The script checks the official OpenHands GitHub latest stable release, downloads the universal DMG only when it is newer than the installed app, verifies the DMG against GitHub's published SHA-256 digest, preserves a pre-change copy, and installs the release. It then adds the microphone usage description to Electron's Renderer helper and signs the app bundle with a valid Apple Development identity from the logged-in user's Keychain and `com.apple.security.device.audio-input` entitlement. It launches OpenHands when finished. OpenHands settings and local Whisper models are stored outside the app bundle and are not removed by this update.
+
+The first successful run also installs the per-user LaunchAgent `local.openhands.agent-canvas.microphone-repair`. It runs at login and checks every 60 seconds for a changed app bundle. When OpenHands is closed, it reapplies the microphone description and signature. It never force-quits a running OpenHands process. If a release update arrives while OpenHands is open, close the app after the update; the next check repairs the bundle before the next launch. Re-running the click utility on an already repaired app does not close it. The LaunchAgent does not download releases on its own; the double-click updater does that.
+
+This local signing uses the Apple Development certificate in that user's Keychain. It is intended to let macOS attribute microphone permission to the Electron app on this Mac; it does not make the upstream OpenHands build Developer ID signed or notarized for distribution. macOS may show a Keychain access prompt on the first run, and may ask the user to grant microphone access again after the bundle identity changes. If that happens, allow microphone access for OpenHands Agent Canvas in System Settings → Privacy & Security → Microphone.
+
+The tool stores its state and logs in `~/Applications/WhisperLocal/config/` and `~/Applications/WhisperLocal/logs/`. The pre-change app copy is kept in `~/Applications/WhisperLocal/backups/`. The repair can be run again safely; it checks the installed version and skips a re-download when current.
+
+To remove the automatic repair watcher, unload and delete its LaunchAgent:
+
+```zsh
+launchctl bootout "gui/$(id -u)/local.openhands.agent-canvas.microphone-repair" 2>/dev/null || true
+rm "$HOME/Library/LaunchAgents/local.openhands.agent-canvas.microphone-repair.plist"
+```
 
 ## API
 
